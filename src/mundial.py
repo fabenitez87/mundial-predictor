@@ -92,51 +92,84 @@ def _ajustar_beta(beta: float, s_atacante: float, s_defensor: float,
     return beta * (1.0 - shrinkage) + beta_media * shrinkage
 
 
+def _shrinkage_adaptivo(n: int) -> float:
+    """
+    Factor de encogimiento hacia la media segun cantidad de partidos internacionales.
+
+    n >= 50  -> 0.30  (confiamos bastante en los datos calibrados)
+    n >= 20  -> 0.60  (confianza media)
+    n <  20  -> 0.85  (pocos datos: casi todo hacia la media)
+    """
+    if n >= 50:
+        return 0.30
+    if n >= 20:
+        return 0.60
+    return 0.85
+
+
 def calcular_lambdas(local: str, visitante: str, fuerzas: dict, gamma: float,
                      media: tuple[float, float],
                      conf_ctx: dict | None = None) -> tuple[float, float]:
     """
-    Retorna (lambda_h, lambda_a) para análisis y tests.
-    Aplica dos correcciones si conf_ctx está presente:
-      1. Beta shrinkage  — la defensa regresa a la media cuando el atacante
-                           viene de una confederación más fuerte.
-      2. Alpha shrinkage — el ataque de TODOS los equipos se encoge hacia la
-                           media WC (alpha_media), con factor alpha_shrinkage.
-                           Corrección para alphas inflados por clasificatorias
-                           débiles (ej. Senegal 3.78 en CAF vs France 1.02 en UEFA).
+    Retorna (lambda_h, lambda_a).
+    Si conf_ctx esta presente aplica tres capas de corrección:
+
+    1. Shrinkage adaptativo (alpha y beta)
+       El factor depende de cuantos partidos internacionales tiene cada equipo.
+       Equipos con pocos datos se acercan mas a la media WC.
+       alpha_adj = (1-sf)*alpha_raw + sf*alpha_media_wc
+       beta_adj  = (1-sf)*beta_raw  + sf*beta_media_wc
+
+    2. Factor de confederacion sobre alpha
+       alpha_adj *= conf_strength[confederacion_equipo]
+       Ejemplo: Haiti (CONCACAF 0.77) alpha se reduce.
+                Argentina (CONMEBOL 1.31) alpha se boosted.
+                France (UEFA 1.0) no cambia.
+
+    3. Ajuste beta cross-confederacion (existente)
+       Cuando el atacante viene de conf mas fuerte, la defensa
+       del rival se encoge hacia la media global.
     """
     ah, bh = _lookup(local,    fuerzas, media)
     aa, ba = _lookup(visitante, fuerzas, media)
 
     if conf_ctx is not None:
-        # ── 1. Alpha shrinkage global (regresion a la media WC) ────────────
-        # Corrige alphas inflados por clasificatorias debiles
-        # (ej: Senegal 3.78 en CAF vs France 1.02 en UEFA competitiva).
-        # alpha_adj = (1-sf)*alpha + sf*alpha_media
-        if "alpha_shrinkage" in conf_ctx:
-            am = conf_ctx["alpha_media"]      # media alpha de los 48 equipos del WC
-            sf = conf_ctx["alpha_shrinkage"]  # factor: 0=sin cambio, 1=todo a la media
-            ah = (1.0 - sf) * ah + sf * am
-            aa = (1.0 - sf) * aa + sf * am
-
-        # ── 2. Beta shrinkage global (regresion a la media WC) ─────────────
-        # Corrige betas extremos: Ivory Coast beta=0.037, Ecuador beta=0.075
-        # calibrados en clasificatorias donde nadie les anota.
-        # beta_adj = (1-bs)*beta + bs*beta_media_wc
-        if "beta_shrinkage" in conf_ctx:
-            bm_wc = conf_ctx["beta_media_wc"]  # media beta de los 48 equipos del WC
-            bs    = conf_ctx["beta_shrinkage"]
-            ba = (1.0 - bs) * ba + bs * bm_wc
-            bh = (1.0 - bs) * bh + bs * bm_wc
-
-        # ── 3. Beta shrinkage por confederacion (contexto cross-conf) ───────
-        # Cuando el atacante viene de una confederacion mas fuerte, la defensa
-        # del rival se debilita adicionalmente (encogimiento hacia beta_media global).
         eq_conf   = conf_ctx["equipo_conf"]
         strengths = conf_ctx["strengths"]
-        bm_global = conf_ctx["beta_media"]   # media global (207 equipos)
+        bm_global = conf_ctx["beta_media"]
         s_h = strengths.get(eq_conf.get(local,    "UEFA"), 1.0)
         s_a = strengths.get(eq_conf.get(visitante, "UEFA"), 1.0)
+
+        if "n_partidos" in conf_ctx and "alpha_media" in conf_ctx:
+            n_part = conf_ctx["n_partidos"]
+            am     = conf_ctx["alpha_media"]    # media alpha de los 48 del WC
+            bm_wc  = conf_ctx["beta_media_wc"]  # media beta de los 48 del WC
+
+            # ── 1. Shrinkage adaptativo ────────────────────────────────────
+            sf_h = _shrinkage_adaptivo(n_part.get(local,    0))
+            sf_a = _shrinkage_adaptivo(n_part.get(visitante, 0))
+
+            ah = (1.0 - sf_h) * ah + sf_h * am
+            aa = (1.0 - sf_a) * aa + sf_a * am
+            bh = (1.0 - sf_h) * bh + sf_h * bm_wc
+            ba = (1.0 - sf_a) * ba + sf_a * bm_wc
+
+            # ── 2. Factor de confederacion sobre alpha ─────────────────────
+            ah *= s_h
+            aa *= s_a
+
+        elif "alpha_shrinkage" in conf_ctx:
+            # Compatibilidad con versión anterior (shrinkage fijo)
+            am    = conf_ctx["alpha_media"]
+            bm_wc = conf_ctx["beta_media_wc"]
+            sf    = conf_ctx["alpha_shrinkage"]
+            bs    = conf_ctx["beta_shrinkage"]
+            ah = (1.0 - sf) * ah + sf * am
+            aa = (1.0 - sf) * aa + sf * am
+            bh = (1.0 - bs) * bh + bs * bm_wc
+            ba = (1.0 - bs) * ba + bs * bm_wc
+
+        # ── 3. Ajuste beta cross-confederacion ────────────────────────────
         ba = _ajustar_beta(ba, s_h, s_a, bm_global)
         bh = _ajustar_beta(bh, s_a, s_h, bm_global)
 

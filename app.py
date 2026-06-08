@@ -37,20 +37,25 @@ def cargar_modelo():
     beta_media = float(np.mean([v[1] for v in fuerzas.values()]))
     media = _media_fuerzas(fuerzas)
 
-    # Medias de alpha y beta calculadas sobre los 48 equipos del Mundial
-    # (usadas como target del shrinkage — mas relevante que la media global de 207)
+    # Medias WC (targets del shrinkage)
     todos_wc = [e for g in GRUPOS.values() for e in g]
     alpha_media_wc = float(np.mean([fuerzas.get(e, media)[0] for e in todos_wc]))
     beta_media_wc  = float(np.mean([fuerzas.get(e, media)[1] for e in todos_wc]))
 
+    # Partidos por equipo en el dataset (determina el factor de shrinkage adaptativo)
+    from src.carga_datos import cargar_internacionales as _ci
+    _df_int = _ci()
+    import pandas as _pd
+    _counts = _pd.concat([_df_int["HomeTeam"], _df_int["AwayTeam"]]).value_counts()
+    n_partidos = _counts.to_dict()
+
     conf_ctx = {
         "strengths":      conf_strengths,
         "equipo_conf":    SELECCION_CONFEDERACION,
-        "beta_media":     beta_media,         # media global (207 equipos, para ajuste conf)
-        "alpha_media":    alpha_media_wc,     # media WC 48 — target alpha shrinkage
-        "beta_media_wc":  beta_media_wc,      # media WC 48 — target beta shrinkage
-        "alpha_shrinkage": 0.7,               # 70% hacia la media WC — corrige alphas extremos
-        "beta_shrinkage":  0.7,               # 70% hacia la media WC — corrige betas extremos
+        "beta_media":     beta_media,       # media global (207 eq) — ajuste cross-conf
+        "alpha_media":    alpha_media_wc,   # media WC 48 — target alpha shrinkage
+        "beta_media_wc":  beta_media_wc,    # media WC 48 — target beta shrinkage
+        "n_partidos":     n_partidos,       # shrinkage adaptativo por equipo
     }
     return fuerzas, gamma, conf_strengths, conf_ctx, media
 
@@ -58,10 +63,15 @@ def cargar_modelo():
 # ── Funciones auxiliares ───────────────────────────────────────────────────
 
 def lambdas_neutral(eq1, eq2, fuerzas, gamma, media, conf_ctx):
-    """Lambdas en sede neutral (promedia ambas asignaciones de localía)."""
+    """
+    Lambdas en sede neutral.
+    Promedia los goles PROPIOS de cada equipo en ambas asignaciones:
+      lambda_eq1 = (eq1_como_local + eq1_como_visitante) / 2  = (lh1 + la2) / 2
+      lambda_eq2 = (eq2_como_local + eq2_como_visitante) / 2  = (lh2 + la1) / 2
+    """
     lh1, la1 = calcular_lambdas(eq1, eq2, fuerzas, gamma, media, conf_ctx)
     lh2, la2 = calcular_lambdas(eq2, eq1, fuerzas, gamma, media, conf_ctx)
-    return (lh1 + lh2) / 2, (la1 + la2) / 2
+    return (lh1 + la2) / 2, (la1 + lh2) / 2
 
 
 def matriz_marcadores(lh, la, max_g=5):

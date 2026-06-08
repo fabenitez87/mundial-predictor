@@ -97,33 +97,70 @@ def main():
     beta_media_wc  = float(np.mean([fuerzas_con.get(e, media_global)[1] for e in todos_wc]))
     print(f"\n   alpha_media WC 48: {alpha_media_wc:.4f}  beta_media WC 48: {beta_media_wc:.4f}")
 
-    # Construir contexto de confederacion para shrinkage
+    # Conteo de partidos por equipo (shrinkage adaptativo)
+    n_partidos_series = pd.concat([df_int["HomeTeam"], df_int["AwayTeam"]]).value_counts()
+    n_partidos = n_partidos_series.to_dict()
+
+    # Construir contexto de confederacion para shrinkage adaptativo
     conf_ctx = {
-        "strengths":       conf_strengths,
-        "equipo_conf":     SELECCION_CONFEDERACION,
-        "beta_media":      beta_media,      # global (207 equipos) — para ajuste conf
-        "alpha_media":     alpha_media_wc,  # WC 48 — target alpha shrinkage
-        "beta_media_wc":   beta_media_wc,   # WC 48 — target beta shrinkage
-        "alpha_shrinkage": 0.7,             # corrige alphas inflados por clasificatorias debiles
-        "beta_shrinkage":  0.7,             # corrige betas extremos (Ivory Coast=0.037, Ecuador=0.075)
+        "strengths":      conf_strengths,
+        "equipo_conf":    SELECCION_CONFEDERACION,
+        "beta_media":     beta_media,       # global (207 equipos) — ajuste cross-conf
+        "alpha_media":    alpha_media_wc,   # WC 48 — target alpha shrinkage
+        "beta_media_wc":  beta_media_wc,    # WC 48 — target beta shrinkage
+        "n_partidos":     n_partidos,       # partidos por equipo -> determina shrinkage
     }
 
-    # ── 5. Test de partidos: con y sin shrinkage ───────────────────────────
-    print("\n5. Test de shrinkage defensivo por confederacion")
-    print("   Efecto esperado: beta de AFC/OFC sube al enfrentar CONMEBOL/UEFA\n")
+    # ── 5. Diagnostico: 48 equipos con parametros ajustados ──────────────────
+    print("\n5. Diagnostico de parametros ajustados (48 equipos del Mundial)")
+    from src.mundial import calcular_lambdas, _shrinkage_adaptivo
 
-    partidos_test = [
-        ("Japan",       "France"),
-        ("Japan",       "New Zealand"),
-        ("Brazil",      "Japan"),
-        ("Argentina",   "Japan"),
-    ]
-    for loc, vis in partidos_test:
-        _mostrar_partido_test(loc, vis, fuerzas_con, gamma_con, media_global,
-                              conf_ctx, conf_strengths)
+    print(f"   {'Equipo':<28} {'N':>4} {'SF':>5} {'a_raw':>7} {'a_adj':>7} {'b_raw':>7} {'b_adj':>7} {'Conf':>9}")
+    print("   " + "-"*76)
 
-    # ── 6. Monte Carlo CON shrinkage ───────────────────────────────────────
-    print(f"6. Monte Carlo CON shrinkage ({N_SIMS:,} sims) ...")
+    todos_wc_sorted = sorted(todos_wc)
+    for e in todos_wc_sorted:
+        n  = n_partidos.get(e, 0)
+        sf = _shrinkage_adaptivo(n)
+        a_raw, b_raw = fuerzas_con.get(e, (alpha_media_wc, beta_media_wc))
+        s  = conf_strengths.get(SELECCION_CONFEDERACION.get(e, "UEFA"), 1.0)
+        conf_name = SELECCION_CONFEDERACION.get(e, "?")
+
+        # Aplicar shrinkage adaptativo + factor confederacion (misma logica que calcular_lambdas)
+        a_adj = ((1.0 - sf) * a_raw + sf * alpha_media_wc) * s
+        b_adj =  (1.0 - sf) * b_raw + sf * beta_media_wc
+
+        print(f"   {e:<28} {n:>4} {sf:>5.2f} {a_raw:>7.3f} {a_adj:>7.3f} {b_raw:>7.3f} {b_adj:>7.3f} {conf_name:>9}")
+
+    # ── 6. Test de partidos clave ──────────────────────────────────────────
+    print("\n6. Test de partidos (sede neutral, probabilities analiticas)")
+    from scipy.stats import poisson as _poisson
+
+    def _test_partido(e1, e2):
+        """Muestra probabilidades 1X2 para un partido neutral."""
+        lh1, la1 = calcular_lambdas(e1, e2, fuerzas_con, gamma_con, media_global, conf_ctx)
+        lh2, la2 = calcular_lambdas(e2, e1, fuerzas_con, gamma_con, media_global, conf_ctx)
+        # Neutral: promedia goles propios de cada equipo en ambas asignaciones
+        lh = (lh1 + la2) / 2   # e1 como local + e1 como visitante
+        la = (la1 + lh2) / 2   # e2 como visitante + e2 como local
+        MAX = 12
+        mat = np.outer(
+            [_poisson.pmf(i, lh) for i in range(MAX)],
+            [_poisson.pmf(j, la) for j in range(MAX)],
+        )
+        p1 = float(np.tril(mat, -1).sum())
+        pd = float(np.trace(mat))
+        p2 = 1.0 - p1 - pd
+        print(f"   {e1} vs {e2}:")
+        print(f"     lambda={lh:.3f} / {la:.3f}   "
+              f"P({e1})={p1:.1%}  P(Empate)={pd:.1%}  P({e2})={p2:.1%}")
+
+    _test_partido("Argentina", "Haiti")
+    _test_partido("France",    "Argentina")
+    print()
+
+    # ── 7. Monte Carlo CON shrinkage adaptativo ────────────────────────────
+    print(f"7. Monte Carlo CON shrinkage adaptativo ({N_SIMS:,} sims) ...")
     t0 = time.time()
     df_v3 = monte_carlo(GRUPOS, fuerzas_con, gamma_con, n=N_SIMS,
                         conf_ctx=conf_ctx)
