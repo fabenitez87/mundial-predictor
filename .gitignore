@@ -1,0 +1,23 @@
+# Datos descargados en runtime — no subir al repo
+data/*.csv
+data/*.xlsx
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Entorno virtual y secretos
+.env
+.venv/
+venv/
+env/
+
+# Logs y temporales
+*.log
+streamlit_log.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
