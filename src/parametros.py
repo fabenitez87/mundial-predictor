@@ -88,6 +88,27 @@ SELECCION_CONFEDERACION: dict[str, str] = {
 
 # ── Utilidades compartidas ─────────────────────────────────────────────────
 
+def escalar_elo_a_alpha(elo_val: float, elo_mean: float, elo_std: float,
+                        alpha_mean: float = 1.88,
+                        alpha_std: float = 0.50) -> float:
+    """
+    Escala un ELO rating al espacio de alpha del modelo Poisson.
+
+    Usa z-score del ELO para mapear linealmente en log-espacio:
+      z     = (elo - elo_mean) / elo_std
+      k     = log(alpha_mean + alpha_std) - log(alpha_mean)
+      alpha = exp(log(alpha_mean) + k * z)
+
+    Propiedades:
+      elo = elo_mean  → alpha = alpha_mean  (equipo promedio)
+      elo = elo_mean + elo_std → alpha = alpha_mean + alpha_std
+      elo = elo_mean - elo_std → alpha = alpha_mean - alpha_std (aprox)
+    """
+    z = (elo_val - elo_mean) / elo_std if elo_std > 0 else 0.0
+    k = np.log(alpha_mean + alpha_std) - np.log(alpha_mean)
+    return float(np.exp(np.log(alpha_mean) + k * z))
+
+
 def _pesos_temporales(df: pd.DataFrame,
                       fecha_ref: pd.Timestamp | None = None,
                       xi: float = XI_CLUBES) -> np.ndarray:
@@ -152,21 +173,23 @@ def estimar_parametros(df: pd.DataFrame,
 
 # ── Estimación con ajuste por confederación (selecciones) ─────────────────
 
-def estimar_selecciones(df: pd.DataFrame) -> tuple[dict, float, dict]:
+def estimar_selecciones(df: pd.DataFrame,
+                        elo_series: "pd.Series | None" = None,
+                        lambda_prior: float = 25.0) -> tuple[dict, float, dict]:
     """
-    MLE L-BFGS-B con decay xi=0.004 + 5 parámetros libres de fuerza
-    por confederación (UEFA fijada en 1.0 como referencia).
+    MLE L-BFGS-B con decay xi=0.004 + 5 parámetros de confederación.
 
-    Modelo:
-      λ_h = γ · αᵢ · s_confᵢ · βⱼ / s_confⱼ
-      λ_a = αⱼ · s_confⱼ · βᵢ / s_confᵢ
+    Si elo_series no es None, usa MAP estimation con prior ELO:
+      penalidad = lambda_prior * sum((log_alpha_i - log_alpha_prior_i)^2)
+    donde log_alpha_prior_i se deriva del ELO rating via escalar_elo_a_alpha().
 
-    Dentro de la misma confederación s se cancela; los partidos
-    cross-conf (Mundiales) calibran los niveles relativos.
+    Esto ancla los alphas a la fortaleza real de cada seleccion, corrigiendo
+    el sesgo que tiene el MLE puro para equipos con pocos datos o clasificatorias
+    de nivel desigual (ej: France 2062 ELO calibra mejor que alpha_raw=1.02).
 
     Normalización post-estimación:
-      α_norm = α · s_conf   (ataque ajustado al nivel global)
-      β_norm = β / s_conf   (debilidad defensiva ajustada al nivel global)
+      α_norm = α · s_conf
+      β_norm = β / s_conf
 
     Retorna (fuerzas_normalizadas, gamma, conf_strengths).
     """
@@ -190,16 +213,27 @@ def estimar_selecciones(df: pd.DataFrame) -> tuple[dict, float, dict]:
     pesos = _pesos_temporales(df, xi=xi)
 
     # Vector de parámetros: [log_alpha×n | log_beta×n | log_gamma | log_s×5]
-    # log_s[0]=UEFA es 0 (fijo); los 5 libres son índices 1-5 del vector params[2n+1:]
     n_conf_free = len(CONFS) - 1  # 5
+
+    # ── Prior ELO para MAP estimation ──────────────────────────────────────
+    log_alpha_prior: np.ndarray | None = None
+    if elo_series is not None:
+        elo_vals = np.array([
+            float(elo_series.get(e, elo_series.mean())) for e in equipos
+        ])
+        elo_mean = float(elo_vals.mean())
+        elo_std  = float(elo_vals.std())
+        alpha_priors = np.array([
+            escalar_elo_a_alpha(v, elo_mean, elo_std) for v in elo_vals
+        ])
+        log_alpha_prior = np.log(alpha_priors)
 
     def objetivo(params: np.ndarray) -> float:
         log_alpha  = params[:n]
         log_beta   = params[n:2*n]
         log_gamma  = params[2*n]
-        log_s_free = params[2*n+1:]            # 5 parámetros libres
+        log_s_free = params[2*n+1:]
 
-        # UEFA = 0 en log-escala (s_UEFA = 1.0 fijo)
         log_s = np.empty(len(CONFS))
         log_s[0] = 0.0
         log_s[1:] = log_s_free
@@ -219,12 +253,21 @@ def estimar_selecciones(df: pd.DataFrame) -> tuple[dict, float, dict]:
             fthg * np.log(lambda_h + 1e-10) - lambda_h - gammaln(fthg + 1) +
             ftag * np.log(lambda_a + 1e-10) - lambda_a - gammaln(ftag + 1)
         )
-        # Regularización L2 sobre los 5 parámetros libres de confederación
-        # para evitar divergencia cuando hay pocos partidos cross-conf (ej. OFC)
+        # L2 sobre parámetros libres de confederación (evita divergencia con poco cross-conf)
         reg = 1.0 * np.sum(log_s_free ** 2)
-        return -ll.sum() + reg
 
+        # MAP: penalidad L2 hacia prior ELO
+        # F(θ) = -logL + λ_conf·||log_s||² + λ_prior·||log_α - log_α_prior||²
+        map_pen = 0.0
+        if log_alpha_prior is not None:
+            map_pen = lambda_prior * np.sum((log_alpha - log_alpha_prior) ** 2)
+
+        return -ll.sum() + reg + map_pen
+
+    # Inicializar en el prior ELO mejora convergencia significativamente
     x0 = np.zeros(2 * n + 1 + n_conf_free)
+    if log_alpha_prior is not None:
+        x0[:n] = log_alpha_prior
     resultado = minimize(
         objetivo,
         x0,

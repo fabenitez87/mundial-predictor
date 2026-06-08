@@ -141,22 +141,32 @@ def calcular_lambdas(local: str, visitante: str, fuerzas: dict, gamma: float,
         s_a = strengths.get(eq_conf.get(visitante, "UEFA"), 1.0)
 
         if "n_partidos" in conf_ctx and "alpha_media" in conf_ctx:
-            n_part = conf_ctx["n_partidos"]
-            am     = conf_ctx["alpha_media"]    # media alpha de los 48 del WC
-            bm_wc  = conf_ctx["beta_media_wc"]  # media beta de los 48 del WC
+            n_part    = conf_ctx["n_partidos"]
+            am_global = conf_ctx["alpha_media"]    # media alpha de los 48 del WC (fallback)
+            bm_wc     = conf_ctx["beta_media_wc"]  # media beta de los 48 del WC
 
             # ── 1. Shrinkage adaptativo ────────────────────────────────────
             sf_h = _shrinkage_adaptivo(n_part.get(local,    0))
             sf_a = _shrinkage_adaptivo(n_part.get(visitante, 0))
 
-            ah = (1.0 - sf_h) * ah + sf_h * am
-            aa = (1.0 - sf_a) * aa + sf_a * am
+            # Target del shrinkage alpha:
+            #   Si hay prior ELO por equipo → usarlo como target (más informativo)
+            #   Si no → usar la media global WC
+            elo_prior = conf_ctx.get("elo_alpha_prior", {})
+            am_h = elo_prior.get(local,    am_global)
+            am_a = elo_prior.get(visitante, am_global)
+
+            ah = (1.0 - sf_h) * ah + sf_h * am_h
+            aa = (1.0 - sf_a) * aa + sf_a * am_a
             bh = (1.0 - sf_h) * bh + sf_h * bm_wc
             ba = (1.0 - sf_a) * ba + sf_a * bm_wc
 
             # ── 2. Factor de confederacion sobre alpha ─────────────────────
-            ah *= s_h
-            aa *= s_a
+            # Cuando hay prior ELO lo saltamos: el ELO ya captura las diferencias
+            # entre confederaciones. Aplicarlo generaria doble-conteo.
+            if not conf_ctx.get("skip_conf_alpha", False):
+                ah *= s_h
+                aa *= s_a
 
         elif "alpha_shrinkage" in conf_ctx:
             # Compatibilidad con versión anterior (shrinkage fijo)

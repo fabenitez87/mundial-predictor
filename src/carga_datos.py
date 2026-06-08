@@ -1,8 +1,29 @@
+import io
 import os
 import requests
 import pandas as pd
 
 COLUMNAS = ["HomeTeam", "AwayTeam", "FTHG", "FTAG"]
+
+# Mapeo: codigo eloratings.net (World.tsv col 2) → nombre en GRUPOS
+ELO_CODIGO_EQUIPO: dict[str, str] = {
+    "ES": "Spain",      "AR": "Argentina",   "FR": "France",
+    "EN": "England",    "BR": "Brazil",       "PT": "Portugal",
+    "CO": "Colombia",   "NL": "Netherlands",  "EC": "Ecuador",
+    "DE": "Germany",    "NO": "Norway",       "HR": "Croatia",
+    "TR": "Turkey",     "JP": "Japan",        "BE": "Belgium",
+    "UY": "Uruguay",    "CH": "Switzerland",  "MX": "Mexico",
+    "SN": "Senegal",    "MA": "Morocco",      "SQ": "Scotland",
+    "AU": "Australia",  "KR": "South Korea",  "HT": "Haiti",
+    "DZ": "Algeria",    "AT": "Austria",      "BA": "Bosnia and Herzegovina",
+    "CA": "Canada",     "CV": "Cape Verde",   "CZ": "Czechia",
+    "CD": "DR Congo",   "EG": "Egypt",        "GH": "Ghana",
+    "IR": "Iran",       "IQ": "Iraq",         "CI": "Ivory Coast",
+    "JO": "Jordan",     "NZ": "New Zealand",  "PA": "Panama",
+    "PY": "Paraguay",   "QA": "Qatar",        "SA": "Saudi Arabia",
+    "ZA": "South Africa", "SE": "Sweden",     "TN": "Tunisia",
+    "UZ": "Uzbekistan", "US": "USA",          "CW": "Curacao",
+}
 
 LIGAS = {
     "E0": "Premier League",
@@ -120,3 +141,55 @@ def cargar_internacionales() -> pd.DataFrame:
     df.to_csv(ruta_csv, index=False)
     print(f"  {len(df)} partidos internacionales procesados -> {ruta_csv}")
     return df
+
+
+# ── ELO ratings de selecciones ─────────────────────────────────────────────
+
+def cargar_elo() -> "pd.Series | None":
+    """
+    Descarga ELO ratings actuales de eloratings.net/World.tsv.
+    Retorna pd.Series(index=equipo, values=elo) para los 48 equipos del WC.
+    Cachea en data/elo_selecciones.csv.
+    Si falla el scraping, retorna None silenciosamente (el pipeline sigue sin ELO).
+    """
+    ruta = os.path.join(DATA_DIR, "elo_selecciones.csv")
+
+    if os.path.exists(ruta):
+        df = pd.read_csv(ruta)
+        return pd.Series(df["elo"].values, index=df["equipo"], name="elo")
+
+    try:
+        print("  Descargando ELO ratings de eloratings.net ...")
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+        # World.tsv: col2=codigo, col3=ELO actual
+        r = requests.get("http://www.eloratings.net/World.tsv",
+                         timeout=15, headers=headers)
+        r.raise_for_status()
+        content = r.content.decode("utf-8", errors="replace")
+        df_world = pd.read_csv(io.StringIO(content), sep="\t", header=None)
+
+        code_elo: dict[str, int] = {}
+        for _, row in df_world.iterrows():
+            try:
+                code_elo[str(row[2])] = int(row[3])
+            except (ValueError, TypeError):
+                pass
+
+        elo_dict: dict[str, int] = {
+            nombre: code_elo[codigo]
+            for codigo, nombre in ELO_CODIGO_EQUIPO.items()
+            if codigo in code_elo
+        }
+        if not elo_dict:
+            raise ValueError("Ningún equipo mapeado en World.tsv")
+
+        elo_series = pd.Series(elo_dict, name="elo")
+        elo_series.index.name = "equipo"
+        elo_series.reset_index().to_csv(ruta, index=False)
+        print(f"  {len(elo_series)} equipos con ELO guardados en {ruta}")
+        return elo_series
+
+    except Exception as exc:
+        print(f"  Advertencia ELO: {exc} — el modelo corre sin prior ELO")
+        return None

@@ -33,29 +33,50 @@ def cargar_modelo():
     from src.parametros import estimar_selecciones
 
     df_int = cargar_internacionales()
-    fuerzas, gamma, conf_strengths = estimar_selecciones(df_int)
+    from src.carga_datos import cargar_elo as _cargar_elo
+    elo_series = _cargar_elo()
+    fuerzas, gamma, conf_strengths = estimar_selecciones(df_int, elo_series=elo_series)
     beta_media = float(np.mean([v[1] for v in fuerzas.values()]))
     media = _media_fuerzas(fuerzas)
 
     # Medias WC (targets del shrinkage)
     todos_wc = [e for g in GRUPOS.values() for e in g]
-    alpha_media_wc = float(np.mean([fuerzas.get(e, media)[0] for e in todos_wc]))
-    beta_media_wc  = float(np.mean([fuerzas.get(e, media)[1] for e in todos_wc]))
+    beta_media_wc = float(np.mean([fuerzas.get(e, media)[1] for e in todos_wc]))
 
     # Partidos por equipo en el dataset (determina el factor de shrinkage adaptativo)
     from src.carga_datos import cargar_internacionales as _ci
-    _df_int = _ci()
     import pandas as _pd
+    _df_int = _ci()
     _counts = _pd.concat([_df_int["HomeTeam"], _df_int["AwayTeam"]]).value_counts()
     n_partidos = _counts.to_dict()
 
+    # Prior ELO como target de shrinkage (cuando está disponible)
+    # Si ELO cargó: usar prior ELO por equipo como target → más informativo que la media
+    # Si ELO falló: usar la media WC global → comportamiento anterior
+    if elo_series is not None:
+        from src.parametros import escalar_elo_a_alpha
+        _elo_vals = np.array([float(elo_series.get(e, elo_series.mean())) for e in todos_wc])
+        _elo_m, _elo_s = float(_elo_vals.mean()), float(_elo_vals.std())
+        elo_alpha_prior = {
+            e: escalar_elo_a_alpha(float(elo_series.get(e, _elo_m)), _elo_m, _elo_s)
+            for e in todos_wc
+        }
+        alpha_media_wc = 1.88  # media incondicional (referencia ELO)
+        skip_conf_alpha = True   # ELO ya captura diferencias entre confederaciones
+    else:
+        elo_alpha_prior = {}
+        alpha_media_wc = float(np.mean([fuerzas.get(e, media)[0] for e in todos_wc]))
+        skip_conf_alpha = False
+
     conf_ctx = {
-        "strengths":      conf_strengths,
-        "equipo_conf":    SELECCION_CONFEDERACION,
-        "beta_media":     beta_media,       # media global (207 eq) — ajuste cross-conf
-        "alpha_media":    alpha_media_wc,   # media WC 48 — target alpha shrinkage
-        "beta_media_wc":  beta_media_wc,    # media WC 48 — target beta shrinkage
-        "n_partidos":     n_partidos,       # shrinkage adaptativo por equipo
+        "strengths":        conf_strengths,
+        "equipo_conf":      SELECCION_CONFEDERACION,
+        "beta_media":       beta_media,         # media global (207 eq) — ajuste cross-conf
+        "alpha_media":      alpha_media_wc,     # target fallback para shrinkage alpha
+        "beta_media_wc":    beta_media_wc,      # media WC 48 — target beta shrinkage
+        "n_partidos":       n_partidos,         # shrinkage adaptativo por equipo
+        "elo_alpha_prior":  elo_alpha_prior,    # prior ELO por equipo (vacío si no hay ELO)
+        "skip_conf_alpha":  skip_conf_alpha,    # True cuando ELO maneja las conf differences
     }
     return fuerzas, gamma, conf_strengths, conf_ctx, media
 

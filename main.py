@@ -77,11 +77,17 @@ def main():
     gl, gv = marcador_mas_probable(pred["matriz"])
     print(f"   Marcador mas probable: {LOCAL} {gl}-{gv} {VISITANTE}\n")
 
-    # ── 4. Calibracion de selecciones con ajuste de confederacion ──────────
-    print("4. Calibrando selecciones con ajuste por confederacion (MLE xi=0.004) ...")
+    # ── 4. Calibracion de selecciones con prior ELO (MAP, lambda=25) ──────────
+    print("4. Calibrando selecciones (MLE xi=0.004 + prior ELO MAP, lambda=25) ...")
     df_int = cargar_internacionales()
-    fuerzas_con, gamma_con, conf_strengths = estimar_selecciones(df_int)
-    print(f"   {len(fuerzas_con)} selecciones | gamma={gamma_con:.4f}")
+    from src.carga_datos import cargar_elo as _cargar_elo
+    from src.parametros import escalar_elo_a_alpha as _esc
+    elo_series = _cargar_elo()
+    fuerzas_con, gamma_con, conf_strengths = estimar_selecciones(
+        df_int, elo_series=elo_series, lambda_prior=25
+    )
+    print(f"   {len(fuerzas_con)} selecciones | gamma={gamma_con:.4f} | "
+          f"ELO prior: {'activo' if elo_series is not None else 'desactivado'}")
 
     print("\n   Niveles de confederacion (UEFA=1.0 referencia):")
     for conf in CONFS:
@@ -89,48 +95,67 @@ def main():
         bar = "#" * int(s * 20)
         print(f"   {conf:<10} s={s:.4f}  {bar}")
 
-    # Medias globales y WC (targets del shrinkage)
+    # Medias globales y WC
     beta_media = float(np.mean([v[1] for v in fuerzas_con.values()]))
     media_global = _media_fuerzas(fuerzas_con)
     todos_wc = [e for g in GRUPOS.values() for e in g]
-    alpha_media_wc = float(np.mean([fuerzas_con.get(e, media_global)[0] for e in todos_wc]))
-    beta_media_wc  = float(np.mean([fuerzas_con.get(e, media_global)[1] for e in todos_wc]))
-    print(f"\n   alpha_media WC 48: {alpha_media_wc:.4f}  beta_media WC 48: {beta_media_wc:.4f}")
+    beta_media_wc = float(np.mean([fuerzas_con.get(e, media_global)[1] for e in todos_wc]))
 
     # Conteo de partidos por equipo (shrinkage adaptativo)
-    n_partidos_series = pd.concat([df_int["HomeTeam"], df_int["AwayTeam"]]).value_counts()
-    n_partidos = n_partidos_series.to_dict()
+    n_partidos = pd.concat([df_int["HomeTeam"], df_int["AwayTeam"]]).value_counts().to_dict()
 
-    # Construir contexto de confederacion para shrinkage adaptativo
+    if elo_series is not None:
+        _elo_vals = np.array([float(elo_series.get(e, elo_series.mean())) for e in todos_wc])
+        _elo_m, _elo_s = float(_elo_vals.mean()), float(_elo_vals.std())
+        elo_alpha_prior = {e: _esc(float(elo_series.get(e, _elo_m)), _elo_m, _elo_s)
+                           for e in todos_wc}
+        alpha_media_wc = 1.88
+        skip_conf_alpha = True
+        print(f"   ELO cargado: {len(elo_series)} equipos | prior ELO activo")
+    else:
+        elo_alpha_prior = {}
+        alpha_media_wc = float(np.mean([fuerzas_con.get(e, media_global)[0] for e in todos_wc]))
+        skip_conf_alpha = False
+        print("   ELO no disponible — shrinkage clasico")
+
+    print(f"   alpha_media WC: {alpha_media_wc:.4f}  beta_media WC: {beta_media_wc:.4f}")
+
+    # Contexto de confederacion
     conf_ctx = {
-        "strengths":      conf_strengths,
-        "equipo_conf":    SELECCION_CONFEDERACION,
-        "beta_media":     beta_media,       # global (207 equipos) — ajuste cross-conf
-        "alpha_media":    alpha_media_wc,   # WC 48 — target alpha shrinkage
-        "beta_media_wc":  beta_media_wc,    # WC 48 — target beta shrinkage
-        "n_partidos":     n_partidos,       # partidos por equipo -> determina shrinkage
+        "strengths":       conf_strengths,
+        "equipo_conf":     SELECCION_CONFEDERACION,
+        "beta_media":      beta_media,
+        "alpha_media":     alpha_media_wc,
+        "beta_media_wc":   beta_media_wc,
+        "n_partidos":      n_partidos,
+        "elo_alpha_prior": elo_alpha_prior,
+        "skip_conf_alpha": skip_conf_alpha,
     }
 
     # ── 5. Diagnostico: 48 equipos con parametros ajustados ──────────────────
-    print("\n5. Diagnostico de parametros ajustados (48 equipos del Mundial)")
+    print("\n5. Diagnostico de parametros (48 equipos del Mundial)")
     from src.mundial import calcular_lambdas, _shrinkage_adaptivo
 
-    print(f"   {'Equipo':<28} {'N':>4} {'SF':>5} {'a_raw':>7} {'a_adj':>7} {'b_raw':>7} {'b_adj':>7} {'Conf':>9}")
-    print("   " + "-"*76)
+    print(f"   {'Equipo':<28} {'ELO':>5} {'N':>4} {'SF':>5} {'a_raw':>7} {'a_adj':>7} {'Conf':>9}")
+    print("   " + "-"*73)
 
     todos_wc_sorted = sorted(todos_wc)
     for e in todos_wc_sorted:
-        n  = n_partidos.get(e, 0)
-        sf = _shrinkage_adaptivo(n)
-        a_raw, b_raw = fuerzas_con.get(e, (alpha_media_wc, beta_media_wc))
-        s  = conf_strengths.get(SELECCION_CONFEDERACION.get(e, "UEFA"), 1.0)
+        n     = n_partidos.get(e, 0)
+        sf    = _shrinkage_adaptivo(n)
+        a_raw = fuerzas_con.get(e, (alpha_media_wc, beta_media_wc))[0]
         conf_name = SELECCION_CONFEDERACION.get(e, "?")
+        elo_v = int(elo_series.get(e, 0)) if elo_series is not None else 0
 
-        # Aplicar shrinkage adaptativo + factor confederacion (misma logica que calcular_lambdas)
-        a_adj = ((1.0 - sf) * a_raw + sf * alpha_media_wc) * s
-        b_adj =  (1.0 - sf) * b_raw + sf * beta_media_wc
+        # alpha_adj: usa ELO prior como target si disponible
+        am_e = elo_alpha_prior.get(e, alpha_media_wc)
+        a_adj = (1.0 - sf) * a_raw + sf * am_e
+        # conf factor solo si no hay ELO
+        if not skip_conf_alpha:
+            s = conf_strengths.get(SELECCION_CONFEDERACION.get(e, "UEFA"), 1.0)
+            a_adj *= s
 
-        print(f"   {e:<28} {n:>4} {sf:>5.2f} {a_raw:>7.3f} {a_adj:>7.3f} {b_raw:>7.3f} {b_adj:>7.3f} {conf_name:>9}")
+        print(f"   {e:<28} {elo_v:>5} {n:>4} {sf:>5.2f} {a_raw:>7.3f} {a_adj:>7.3f} {conf_name:>9}")
 
     # ── 6. Test de partidos clave ──────────────────────────────────────────
     print("\n6. Test de partidos (sede neutral, probabilities analiticas)")
@@ -155,8 +180,10 @@ def main():
         print(f"     lambda={lh:.3f} / {la:.3f}   "
               f"P({e1})={p1:.1%}  P(Empate)={pd:.1%}  P({e2})={p2:.1%}")
 
-    _test_partido("Argentina", "Haiti")
-    _test_partido("France",    "Argentina")
+    _test_partido("Argentina", "Haiti")    # target: ~70-75% Argentina
+    _test_partido("France",    "Argentina") # target: ~38-42% France
+    _test_partido("Brazil",    "Germany")   # target: ~35-40% cada uno
+    _test_partido("Spain",     "France")    # target: ~40-45% Spain
     print()
 
     # ── 7. Monte Carlo CON shrinkage adaptativo ────────────────────────────
