@@ -36,10 +36,21 @@ def cargar_modelo():
     fuerzas, gamma, conf_strengths = estimar_selecciones(df_int)
     beta_media = float(np.mean([v[1] for v in fuerzas.values()]))
     media = _media_fuerzas(fuerzas)
+
+    # Medias de alpha y beta calculadas sobre los 48 equipos del Mundial
+    # (usadas como target del shrinkage — mas relevante que la media global de 207)
+    todos_wc = [e for g in GRUPOS.values() for e in g]
+    alpha_media_wc = float(np.mean([fuerzas.get(e, media)[0] for e in todos_wc]))
+    beta_media_wc  = float(np.mean([fuerzas.get(e, media)[1] for e in todos_wc]))
+
     conf_ctx = {
-        "strengths":   conf_strengths,
-        "equipo_conf": SELECCION_CONFEDERACION,
-        "beta_media":  beta_media,
+        "strengths":      conf_strengths,
+        "equipo_conf":    SELECCION_CONFEDERACION,
+        "beta_media":     beta_media,         # media global (207 equipos, para ajuste conf)
+        "alpha_media":    alpha_media_wc,     # media WC 48 — target alpha shrinkage
+        "beta_media_wc":  beta_media_wc,      # media WC 48 — target beta shrinkage
+        "alpha_shrinkage": 0.7,               # 70% hacia la media WC — corrige alphas extremos
+        "beta_shrinkage":  0.7,               # 70% hacia la media WC — corrige betas extremos
     }
     return fuerzas, gamma, conf_strengths, conf_ctx, media
 

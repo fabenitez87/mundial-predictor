@@ -89,17 +89,23 @@ def main():
         bar = "#" * int(s * 20)
         print(f"   {conf:<10} s={s:.4f}  {bar}")
 
-    # Media beta global (objetivo del shrinkage)
+    # Medias globales y WC (targets del shrinkage)
     beta_media = float(np.mean([v[1] for v in fuerzas_con.values()]))
-    print(f"\n   beta_media global (objetivo shrinkage): {beta_media:.4f}")
-
     media_global = _media_fuerzas(fuerzas_con)
+    todos_wc = [e for g in GRUPOS.values() for e in g]
+    alpha_media_wc = float(np.mean([fuerzas_con.get(e, media_global)[0] for e in todos_wc]))
+    beta_media_wc  = float(np.mean([fuerzas_con.get(e, media_global)[1] for e in todos_wc]))
+    print(f"\n   alpha_media WC 48: {alpha_media_wc:.4f}  beta_media WC 48: {beta_media_wc:.4f}")
 
     # Construir contexto de confederacion para shrinkage
     conf_ctx = {
-        "strengths":  conf_strengths,
-        "equipo_conf": SELECCION_CONFEDERACION,
-        "beta_media":  beta_media,
+        "strengths":       conf_strengths,
+        "equipo_conf":     SELECCION_CONFEDERACION,
+        "beta_media":      beta_media,      # global (207 equipos) — para ajuste conf
+        "alpha_media":     alpha_media_wc,  # WC 48 — target alpha shrinkage
+        "beta_media_wc":   beta_media_wc,   # WC 48 — target beta shrinkage
+        "alpha_shrinkage": 0.7,             # corrige alphas inflados por clasificatorias debiles
+        "beta_shrinkage":  0.7,             # corrige betas extremos (Ivory Coast=0.037, Ecuador=0.075)
     }
 
     # ── 5. Test de partidos: con y sin shrinkage ───────────────────────────
