@@ -4,6 +4,7 @@ Modelo Poisson bivariado + Monte Carlo + ajuste por confederacion
 """
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 from scipy.stats import poisson
 
@@ -163,15 +164,17 @@ if seccion == "⚽  Predictor de partido":
 
         st.divider()
 
+        # Precalcular candidatos (usados en top 5, top 10 y heatmap)
+        candidatos = sorted(
+            ((mat[i, j], i, j) for i in range(6) for j in range(6)),
+            reverse=True,
+        )
+
         # ── Top 5 + Heatmap ───────────────────────────────────────────────
         col_left, col_right = st.columns([1, 2])
 
         with col_left:
             st.subheader("Top 5 marcadores")
-            candidatos = sorted(
-                ((mat[i, j], i, j) for i in range(6) for j in range(6)),
-                reverse=True,
-            )
             df_top5 = pd.DataFrame(
                 [
                     {"Marcador": f"{eq1} {i} – {j} {eq2}",
@@ -184,22 +187,71 @@ if seccion == "⚽  Predictor de partido":
         with col_right:
             st.subheader("Heatmap de marcadores (goles 0–5)")
             st.caption(
-                f"**Filas** = goles de {eq1}  ·  "
-                f"**Columnas** = goles de {eq2}  ·  Valores en %"
+                f"Filas = goles de **{eq1}**  ·  "
+                f"Columnas = goles de **{eq2}**"
             )
-            df_heat = pd.DataFrame(
+            fig_heat = px.imshow(
                 mat * 100,
-                index=[str(i) for i in range(6)],
-                columns=[str(j) for j in range(6)],
+                x=[str(j) for j in range(6)],
+                y=[str(i) for i in range(6)],
+                labels={"x": eq2, "y": eq1, "color": "Prob (%)"},
+                color_continuous_scale="YlOrRd",
+                text_auto=".2f",
+                aspect="equal",
             )
-            df_heat.index.name = f"{eq1[:3]} \\ {eq2[:3]}"
+            fig_heat.update_coloraxes(colorbar_title="Prob (%)")
+            fig_heat.update_layout(
+                margin=dict(l=10, r=10, t=10, b=10),
+                height=320,
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
 
-            styled = (
-                df_heat.style
-                .background_gradient(cmap="YlOrRd", axis=None)
-                .format("{:.2f}%")
-            )
-            st.dataframe(styled, use_container_width=True)
+        # ── Top 10 marcadores — barras horizontales ────────────────────────
+        st.subheader("Top 10 marcadores mas probables")
+
+        color_e1  = "#2196F3"   # azul → gana equipo 1
+        color_draw = "#9E9E9E"  # gris → empate
+        color_e2  = "#F44336"   # rojo → gana equipo 2
+
+        df_bar = pd.DataFrame([
+            {
+                "Marcador":       f"{eq1} {i}–{j} {eq2}",
+                "Prob (%)":       round(p * 100, 2),
+                "Resultado":      (
+                    f"{eq1} gana" if i > j
+                    else "Empate" if i == j
+                    else f"{eq2} gana"
+                ),
+            }
+            for p, i, j in candidatos[:10]
+        ])
+
+        fig_bar = px.bar(
+            df_bar.iloc[::-1].reset_index(drop=True),  # mayor prob arriba
+            x="Prob (%)",
+            y="Marcador",
+            color="Resultado",
+            orientation="h",
+            text="Prob (%)",
+            color_discrete_map={
+                f"{eq1} gana": color_e1,
+                "Empate":       color_draw,
+                f"{eq2} gana": color_e2,
+            },
+            labels={"Prob (%)": "Probabilidad (%)", "Marcador": ""},
+        )
+        fig_bar.update_traces(
+            texttemplate="%{x:.2f}%",
+            textposition="outside",
+        )
+        fig_bar.update_layout(
+            height=420,
+            margin=dict(l=10, r=110, t=10, b=10),
+            legend=dict(title="Resultado", orientation="h",
+                        yanchor="bottom", y=1.02, xanchor="right", x=1),
+            xaxis=dict(title="Probabilidad (%)", range=[0, df_bar["Prob (%)"].max() * 1.35]),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════
